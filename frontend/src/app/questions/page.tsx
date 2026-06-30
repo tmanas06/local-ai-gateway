@@ -52,6 +52,179 @@ function ProviderBadge({ provider }: { provider: string }) {
   );
 }
 
+interface ChatSession {
+  _id: string;
+  timestamp: string;
+  api_key_name: string;
+  org: string;
+  routed_model: string;
+  provider: string;
+  routing_reason: string;
+  client_location?: { country: string; region: string; city: string };
+  client_ip: string;
+  success: boolean;
+  error: string | null;
+  status_code: number;
+  input_tokens: number;
+  output_tokens: number;
+  latency_ms: number;
+  response_preview: string;
+  prompt_preview: string;
+  messages: Array<{
+    role: string;
+    content: string;
+    routed_model?: string;
+    provider?: string;
+    routing_reason?: string;
+    latency_ms?: number;
+    input_tokens?: number;
+    output_tokens?: number;
+    success?: boolean;
+    error?: string | null;
+    status_code?: number;
+    timestamp?: string;
+  }>;
+  logs: RequestLogDoc[];
+}
+
+function groupLogsIntoSessions(logs: RequestLogDoc[]): ChatSession[] {
+  if (!logs || logs.length === 0) return [];
+
+  // Group logs by api_key_name + client_ip
+  const groups: Record<string, RequestLogDoc[]> = {};
+  for (const log of logs) {
+    const key = `${log.api_key_name || "default"}_${log.client_ip || "unknown"}`;
+    if (!groups[key]) {
+      groups[key] = [];
+    }
+    groups[key].push(log);
+  }
+
+  const sessions: ChatSession[] = [];
+
+  for (const key in groups) {
+    // Sort chronologically (oldest first) to find conversations
+    const sortedLogs = [...groups[key]].sort(
+      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    );
+
+    let currentSessionLogs: RequestLogDoc[] = [];
+
+    for (const log of sortedLogs) {
+      if (currentSessionLogs.length === 0) {
+        currentSessionLogs.push(log);
+      } else {
+        const lastLog = currentSessionLogs[currentSessionLogs.length - 1];
+        const timeDiff = new Date(log.timestamp).getTime() - new Date(lastLog.timestamp).getTime();
+
+        // Group requests occurring within 15 minutes of each other
+        if (timeDiff < 15 * 60 * 1000) {
+          currentSessionLogs.push(log);
+        } else {
+          sessions.push(createSessionFromLogs(currentSessionLogs));
+          currentSessionLogs = [log];
+        }
+      }
+    }
+
+    if (currentSessionLogs.length > 0) {
+      sessions.push(createSessionFromLogs(currentSessionLogs));
+    }
+  }
+
+  // Sort sessions by latest activity timestamp (newest first)
+  return sessions.sort(
+    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+  );
+}
+
+function createSessionFromLogs(sessionLogs: RequestLogDoc[]): ChatSession {
+  const sorted = [...sessionLogs].sort(
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+  );
+  
+  const latestLog = sorted[sorted.length - 1];
+  const totalInputTokens = sorted.reduce((sum, l) => sum + (l.input_tokens || 0), 0);
+  const totalOutputTokens = sorted.reduce((sum, l) => sum + (l.output_tokens || 0), 0);
+  const totalLatency = sorted.reduce((sum, l) => sum + (l.latency_ms || 0), 0);
+
+  const combinedMessages: ChatSession["messages"] = [];
+
+  for (const log of sorted) {
+    const logMsgs = log.messages || [];
+    const msgsToProcess = logMsgs.length > 0
+      ? logMsgs
+      : [
+          ...(log.prompt_preview ? [{ role: "user", content: log.prompt_preview }] : []),
+          ...(log.response_preview ? [{ role: "assistant", content: log.response_preview }] : [])
+        ];
+
+    for (const msg of msgsToProcess) {
+      const isSystem = msg.role === "system";
+      
+      if (isSystem) {
+        const hasSystem = combinedMessages.some(m => m.role === "system");
+        if (!hasSystem) {
+          combinedMessages.push({
+            role: msg.role,
+            content: msg.content,
+          });
+        }
+        continue;
+      }
+
+      // Simple deduplication for stateful clients
+      const isDuplicate = combinedMessages.some(
+        m => m.role === msg.role && m.content.trim() === msg.content.trim()
+      );
+
+      if (!isDuplicate) {
+        combinedMessages.push({
+          role: msg.role,
+          content: msg.content,
+          ...(msg.role === "assistant" ? {
+            routed_model: log.routed_model,
+            provider: log.provider,
+            routing_reason: log.routing_reason,
+            latency_ms: log.latency_ms,
+            input_tokens: log.input_tokens,
+            output_tokens: log.output_tokens,
+            success: log.success,
+            error: log.error,
+            status_code: log.status_code,
+            timestamp: log.timestamp,
+          } : {})
+        });
+      }
+    }
+  }
+
+  const userMsgs = combinedMessages.filter(m => m.role === "user");
+  const lastUserMsg = userMsgs[userMsgs.length - 1]?.content || latestLog.prompt_preview || "(No text)";
+
+  return {
+    _id: latestLog._id,
+    timestamp: latestLog.timestamp,
+    api_key_name: latestLog.api_key_name,
+    org: latestLog.org,
+    routed_model: latestLog.routed_model,
+    provider: latestLog.provider,
+    routing_reason: latestLog.routing_reason,
+    client_location: latestLog.client_location,
+    client_ip: latestLog.client_ip,
+    success: latestLog.success,
+    error: latestLog.error,
+    status_code: latestLog.status_code,
+    input_tokens: totalInputTokens,
+    output_tokens: totalOutputTokens,
+    latency_ms: totalLatency,
+    response_preview: latestLog.response_preview,
+    prompt_preview: lastUserMsg,
+    messages: combinedMessages,
+    logs: sorted,
+  };
+}
+
 export default function QuestionsPage() {
   const [data, setData] = useState<RequestLogDoc[]>([]);
   const [total, setTotal] = useState(0);
@@ -159,18 +332,17 @@ export default function QuestionsPage() {
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          {data.map((row) => {
+          {groupLogsIntoSessions(data).map((row) => {
             const isExpanded = !!expandedIds[row._id];
-            
-            // Extract the user prompt
-            const userMessages = row.messages?.filter((m) => m.role === "user") || [];
-            const lastUserMsg = userMessages[userMessages.length - 1]?.content || row.prompt_preview || "(No text)";
             
             // Locate client location representation
             const loc = row.client_location;
             const locationStr = loc?.city && loc?.country 
               ? `${loc.city}, ${loc.country}` 
               : "Local Network";
+
+            const userMessages = row.messages.filter((m) => m.role === "user");
+            const turnCount = userMessages.length;
 
             return (
               <div
@@ -239,6 +411,20 @@ export default function QuestionsPage() {
                     </div>
                     {/* Provider badge */}
                     <ProviderBadge provider={row.provider} />
+                    {/* Conversation Turn badge */}
+                    <span
+                      style={{
+                        background: "rgba(245, 158, 11, 0.15)",
+                        color: "#f59e0b",
+                        border: "1px solid rgba(245, 158, 11, 0.3)",
+                        borderRadius: 6,
+                        padding: "2px 8px",
+                        fontSize: 11,
+                        fontWeight: 700,
+                      }}
+                    >
+                      {turnCount} {turnCount === 1 ? "turn" : "turns"}
+                    </span>
                   </div>
                 </div>
 
@@ -264,7 +450,7 @@ export default function QuestionsPage() {
                     Q
                   </div>
                   <div style={{ flex: 1, color: "white", fontSize: 14, fontWeight: 500, lineHeight: 1.5, wordBreak: "break-word" }}>
-                    {lastUserMsg}
+                    {row.prompt_preview}
                   </div>
                 </div>
 
@@ -312,49 +498,104 @@ export default function QuestionsPage() {
                             key={index}
                             style={{
                               display: "flex",
-                              gap: 12,
+                              flexDirection: "column",
                               alignSelf: isUser ? "flex-end" : "flex-start",
                               maxWidth: "85%",
-                              flexDirection: isUser ? "row-reverse" : "row",
+                              gap: 6,
                             }}
                           >
                             <div
                               style={{
-                                width: 28,
-                                height: 28,
-                                borderRadius: 6,
-                                background: isUser ? "rgba(139,92,246,0.2)" : "rgba(255, 255, 255, 0.04)",
-                                border: `1px solid ${isUser ? "rgba(139,92,246,0.4)" : "rgba(45,45,75,0.6)"}`,
                                 display: "flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                                color: isUser ? "#a78bfa" : "#34d399",
-                                fontWeight: 700,
-                                fontSize: 11,
-                                flexShrink: 0,
+                                gap: 12,
+                                flexDirection: isUser ? "row-reverse" : "row",
                               }}
                             >
-                              {isUser ? "U" : "A"}
+                              <div
+                                style={{
+                                  width: 28,
+                                  height: 28,
+                                  borderRadius: 6,
+                                  background: isUser ? "rgba(139,92,246,0.2)" : "rgba(255, 255, 255, 0.04)",
+                                  border: `1px solid ${isUser ? "rgba(139,92,246,0.4)" : "rgba(45,45,75,0.6)"}`,
+                                  display: "flex",
+                                  alignItems: "center",
+                                  justifyContent: "center",
+                                  color: isUser ? "#a78bfa" : "#34d399",
+                                  fontWeight: 700,
+                                  fontSize: 11,
+                                  flexShrink: 0,
+                                }}
+                              >
+                                {isUser ? "U" : "A"}
+                              </div>
+                              <div
+                                style={{
+                                  background: isUser
+                                    ? "linear-gradient(135deg, rgba(139,92,246,0.15), rgba(109,40,217,0.1))"
+                                    : "rgba(25, 25, 35, 0.8)",
+                                  border: `1px solid ${isUser ? "rgba(139,92,246,0.25)" : "rgba(45,45,75,0.5)"}`,
+                                  padding: "12px 16px",
+                                  borderRadius: 12,
+                                  borderTopRightRadius: isUser ? 2 : 12,
+                                  borderTopLeftRadius: !isUser ? 2 : 12,
+                                  fontSize: 13,
+                                  color: "#f1f5f9",
+                                  lineHeight: 1.6,
+                                  whiteSpace: "pre-wrap",
+                                  wordBreak: "break-word",
+                                }}
+                              >
+                                {msg.content}
+                              </div>
                             </div>
-                            <div
-                              style={{
-                                background: isUser
-                                  ? "linear-gradient(135deg, rgba(139,92,246,0.15), rgba(109,40,217,0.1))"
-                                  : "rgba(25, 25, 35, 0.8)",
-                                border: `1px solid ${isUser ? "rgba(139,92,246,0.25)" : "rgba(45,45,75,0.5)"}`,
-                                padding: "12px 16px",
-                                borderRadius: 12,
-                                borderTopRightRadius: isUser ? 2 : 12,
-                                borderTopLeftRadius: !isUser ? 2 : 12,
-                                fontSize: 13,
-                                color: "#f1f5f9",
-                                lineHeight: 1.6,
-                                whiteSpace: "pre-wrap",
-                                wordBreak: "break-word",
-                              }}
-                            >
-                              {msg.content}
-                            </div>
+
+                            {/* Metadata below Assistant Bubble */}
+                            {!isUser && !isSystem && msg.routed_model && (
+                              <div
+                                style={{
+                                  marginLeft: 40,
+                                  fontSize: 10,
+                                  color: "rgba(148,163,184,0.5)",
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: 8,
+                                  flexWrap: "wrap",
+                                }}
+                              >
+                                <span style={{ color: "#a78bfa", fontWeight: 600 }}>{msg.routed_model}</span>
+                                <span>•</span>
+                                <span style={{ color: msg.latency_ms && msg.latency_ms > 2000 ? "#ef4444" : "#22c55e" }}>
+                                  {msg.latency_ms}ms
+                                </span>
+                                <span>•</span>
+                                <span>{msg.input_tokens} in / {msg.output_tokens} out</span>
+                                {msg.routing_reason && (
+                                  <>
+                                    <span>•</span>
+                                    <span style={{ fontStyle: "italic" }}>{msg.routing_reason}</span>
+                                  </>
+                                )}
+                              </div>
+                            )}
+
+                            {/* Individual turn error message */}
+                            {!isUser && !isSystem && msg.success === false && msg.error && (
+                              <div
+                                style={{
+                                  marginLeft: 40,
+                                  background: "rgba(239,68,68,0.05)",
+                                  border: "1px solid rgba(239,68,68,0.2)",
+                                  borderRadius: 8,
+                                  padding: "6px 10px",
+                                  fontSize: 11,
+                                  color: "#ef4444",
+                                  marginTop: 4,
+                                }}
+                              >
+                                <strong>Error:</strong> {msg.error} (Status: {msg.status_code})
+                              </div>
+                            )}
                           </div>
                         );
                       })
@@ -394,50 +635,6 @@ export default function QuestionsPage() {
                         >
                           {row.response_preview || "(No assistant response preview recorded)"}
                         </div>
-                      </div>
-                    )}
-
-                    {/* Routing logic reason banner */}
-                    <div
-                      style={{
-                        background: "rgba(245,158,11,0.03)",
-                        border: "1px solid rgba(245,158,11,0.2)",
-                        borderRadius: 10,
-                        padding: "10px 14px",
-                        fontSize: 12,
-                        color: "rgba(245,158,11,0.9)",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 8,
-                        marginTop: 10,
-                      }}
-                    >
-                      <Activity size={14} />
-                      <span>
-                        Routed to model <strong>{row.routed_model}</strong> due to:{" "}
-                        <em>{row.routing_reason}</em>
-                      </span>
-                    </div>
-
-                    {/* Error display if failed */}
-                    {!row.success && row.error && (
-                      <div
-                        style={{
-                          background: "rgba(239,68,68,0.05)",
-                          border: "1px solid rgba(239,68,68,0.2)",
-                          borderRadius: 10,
-                          padding: "10px 14px",
-                          fontSize: 12,
-                          color: "#ef4444",
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 8,
-                        }}
-                      >
-                        <AlertCircle size={14} />
-                        <span>
-                          <strong>Error details:</strong> {row.error} (Status: {row.status_code})
-                        </span>
                       </div>
                     )}
                   </div>

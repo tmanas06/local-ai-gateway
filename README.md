@@ -124,3 +124,5 @@ curl http://localhost:8000/v1/chat/completions \
 
 5. Go back to `http://localhost:3000` to inspect live usage charts and full request audits.
 # local-ai-gateway
+ ngrok config add-authtoken token
+ ngrok http 8000
