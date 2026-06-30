@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+motor
+redis[asyncio]
+pydantic
+pydantic-settings
+httpx
+python-dotenv
+passlib[bcrypt]
+python-jose[cryptography]
+prometheus-fastapi-instrumentator
+pytest
+pytest-asyncio
