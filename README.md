@@ -126,3 +126,8 @@ curl http://localhost:8000/v1/chat/completions \
 # local-ai-gateway
  ngrok config add-authtoken token
  ngrok http 8000
+
+
+ # Run entirely at once
+ ./run-dev.sh
+
