@@ -18,9 +18,13 @@ class RequestLog(BaseModel):
     provider: str
     routing_reason: str
 
-    # Content (truncated for storage efficiency)
+    # Content
     prompt_preview: str           # first 500 chars of last user message
     response_preview: str         # first 500 chars of response
+    messages: list[dict] = Field(default=[])
+
+    # Location
+    client_location: dict = Field(default={"country": "Local", "region": "Local", "city": "Local Network"})
 
     # Metrics
     input_tokens: int

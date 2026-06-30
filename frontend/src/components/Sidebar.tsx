@@ -8,11 +8,13 @@ import {
   Cpu,
   Key,
   Zap,
+  HelpCircle,
 } from "lucide-react";
 
 const nav = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
   { href: "/requests", label: "Requests", icon: List },
+  { href: "/questions", label: "Questions", icon: HelpCircle },
   { href: "/models", label: "Models", icon: Cpu },
   { href: "/keys", label: "API Keys", icon: Key },
 ];

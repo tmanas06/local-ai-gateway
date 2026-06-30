@@ -29,12 +29,14 @@ export const api = {
     limit?: number;
     model?: string;
     success?: boolean;
+    search?: string;
   }) => {
     const qs = new URLSearchParams();
     if (params?.skip != null) qs.set("skip", String(params.skip));
     if (params?.limit != null) qs.set("limit", String(params.limit));
     if (params?.model) qs.set("model", params.model);
     if (params?.success != null) qs.set("success", String(params.success));
+    if (params?.search) qs.set("search", params.search);
     return apiFetch<RequestLogPage>(`/admin/requests?${qs}`);
   },
   keys: () => apiFetch<APIKey[]>("/admin/keys"),
@@ -105,6 +107,8 @@ export interface RequestLogDoc {
   routing_reason: string;
   prompt_preview: string;
   response_preview: string;
+  messages?: Array<{ role: string; content: string }>;
+  client_location?: { country: string; region: string; city: string };
   input_tokens: number;
   output_tokens: number;
   latency_ms: number;

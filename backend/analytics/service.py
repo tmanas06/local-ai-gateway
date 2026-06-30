@@ -152,3 +152,35 @@ async def get_top_users(db: AsyncIOMotorDatabase, limit: int = 10) -> list[dict]
         }
         for r in results
     ]
+
+
+async def get_location_breakdown(db: AsyncIOMotorDatabase, limit: int = 10) -> list[dict]:
+    since = datetime.now(UTC) - timedelta(days=7)
+    pipeline = [
+        {"$match": {"timestamp": {"$gte": since}}},
+        {"$group": {
+            "_id": {
+                "country": "$client_location.country",
+                "region": "$client_location.region",
+                "city": "$client_location.city"
+            },
+            "requests": {"$sum": 1},
+            "input_tokens": {"$sum": "$input_tokens"},
+            "output_tokens": {"$sum": "$output_tokens"},
+        }},
+        {"$sort": {"requests": -1}},
+        {"$limit": limit},
+    ]
+    results = await db.request_logs.aggregate(pipeline).to_list(None)
+    out = []
+    for r in results:
+        loc = r["_id"] or {}
+        out.append({
+            "country": loc.get("country") or "Local",
+            "region": loc.get("region") or "Local",
+            "city": loc.get("city") or "Local Network",
+            "requests": r["requests"],
+            "input_tokens": r["input_tokens"],
+            "output_tokens": r["output_tokens"],
+        })
+    return out

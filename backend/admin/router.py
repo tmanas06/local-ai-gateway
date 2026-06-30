@@ -12,6 +12,7 @@ from analytics.service import (
     get_overview,
     get_timeseries,
     get_top_users,
+    get_location_breakdown,
 )
 from auth.models import APIKeyCreate, APIKeyCreateResponse, APIKeyPublic
 from auth.service import create_api_key, list_api_keys, revoke_api_key
@@ -62,6 +63,12 @@ async def stats_top_users(limit: int = Query(default=10, ge=1, le=50)):
     return await get_top_users(db, limit=limit)
 
 
+@router.get("/stats/locations", dependencies=[AdminDep])
+async def stats_locations(limit: int = Query(default=10, ge=1, le=50)):
+    db = get_db()
+    return await get_location_breakdown(db, limit=limit)
+
+
 # ── Request logs ──────────────────────────────────────────────────────────────
 
 @router.get("/requests", dependencies=[AdminDep])
@@ -72,10 +79,11 @@ async def list_requests(
     org: str | None = None,
     success: bool | None = None,
     since: datetime | None = None,
+    search: str | None = None,
 ):
     db = get_db()
     docs, total = await get_logs(
-        db, skip=skip, limit=limit, model=model, org=org, success=success, since=since
+        db, skip=skip, limit=limit, model=model, org=org, success=success, since=since, search=search
     )
     # Convert ObjectId → str for JSON serialisation
     for doc in docs:
